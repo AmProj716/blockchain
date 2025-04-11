@@ -1,0 +1,93 @@
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
+
+describe("RealEstate Contract", function () {
+  let realEstate, seller, buyer, notary, bank, registryOfficial;
+  let admin;
+
+  beforeEach(async function () {
+    [admin, seller, buyer, notary, bank, registryOfficial] = await ethers.getSigners();
+    const RealEstate = await ethers.getContractFactory("RealEstate");
+    realEstate = await RealEstate.deploy();
+    await realEstate.deployed();
+
+    // Assign roles to accounts using AccessControl from OpenZeppelin.
+    const SELLER_ROLE = await realEstate.SELLER_ROLE();
+    const BUYER_ROLE = await realEstate.BUYER_ROLE();
+    const NOTARY_ROLE = await realEstate.NOTARY_ROLE();
+    const BANK_ROLE = await realEstate.BANK_ROLE();
+    const REGISTRY_OFFICIAL_ROLE = await realEstate.REGISTRY_OFFICIAL_ROLE();
+
+    await realEstate.connect(admin).grantRole(SELLER_ROLE, seller.address);
+    await realEstate.connect(admin).grantRole(BUYER_ROLE, buyer.address);
+    await realEstate.connect(admin).grantRole(NOTARY_ROLE, notary.address);
+    await realEstate.connect(admin).grantRole(BANK_ROLE, bank.address);
+    await realEstate.connect(admin).grantRole(REGISTRY_OFFICIAL_ROLE, registryOfficial.address);
+  });
+
+  it("Should list a property and emit PropertyListed event", async function () {
+    const price = ethers.utils.parseEther("100");
+    const ipfsHash = "QmXyz123...abc";
+
+    await expect(realEstate.connect(seller).listProperty(price, ipfsHash))
+      .to.emit(realEstate, "PropertyListed")
+      .withArgs(1, seller.address, price, ipfsHash);
+
+    const property = await realEstate.properties(1);
+    expect(property.owner).to.equal(seller.address);
+    expect(property.price).to.equal(price);
+  });
+
+  it("Should verify a property", async function () {
+    const price = ethers.utils.parseEther("100");
+    const ipfsHash = "QmXyz123...abc";
+    await realEstate.connect(seller).listProperty(price, ipfsHash);
+
+    await expect(realEstate.connect(notary).verifyProperty(1))
+      .to.emit(realEstate, "PropertyVerified")
+      .withArgs(1, notary.address);
+
+    const property = await realEstate.properties(1);
+    expect(property.isVerified).to.equal(true);
+  });
+
+  it("Should make an offer and initiate escrow", async function () {
+    const price = ethers.utils.parseEther("100");
+    const ipfsHash = "QmXyz123...abc";
+    await realEstate.connect(seller).listProperty(price, ipfsHash);
+    await realEstate.connect(notary).verifyProperty(1);
+
+    await expect(
+      realEstate.connect(buyer).makeOffer(1, { value: price })
+    )
+      .to.emit(realEstate, "OfferMade")
+      .withArgs(1, buyer.address, price)
+      .and.to.emit(realEstate, "EscrowInitiated")
+      .withArgs(1, price);
+
+    const property = await realEstate.properties(1);
+    expect(property.buyer).to.equal(buyer.address);
+    expect(property.inEscrow).to.equal(true);
+  });
+
+  it("Should release milestone payment and finalize the sale", async function () {
+    const price = ethers.utils.parseEther("100");
+    const ipfsHash = "QmXyz123...abc";
+    await realEstate.connect(seller).listProperty(price, ipfsHash);
+    await realEstate.connect(notary).verifyProperty(1);
+    await realEstate.connect(buyer).makeOffer(1, { value: price });
+
+    // Release the full milestone payment.
+    await expect(realEstate.connect(bank).releaseMilestone(1, 1, price))
+      .to.emit(realEstate, "MilestonePaymentReleased")
+      .withArgs(1, 1, price);
+
+    // Finalize the sale.
+    await expect(realEstate.connect(buyer).finalizeSale(1))
+      .to.emit(realEstate, "OwnershipTransferred");
+
+    const property = await realEstate.properties(1);
+    expect(property.owner).to.equal(buyer.address);
+    expect(property.inEscrow).to.equal(false);
+  });
+});
