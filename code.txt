@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+// Importing OpenZeppelin contracts for role management and reentrancy protection.
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+/**
+ * @title RealEstate
+ * @dev A smart contract for a decentralized real estate platform supporting multiple roles,
+ * property listing with verified IPFS documents, buyer offers with escrow and milestone payments,
+ * fractional tokenization, automated rent distribution, DAO-based dispute resolution, and audit trails.
+ */
+contract RealEstate is AccessControl, ReentrancyGuard {
+    // Role definitions using OpenZeppelin's AccessControl.
+    bytes32 public constant SELLER_ROLE = keccak256("SELLER_ROLE");
+    bytes32 public constant BUYER_ROLE = keccak256("BUYER_ROLE");
+    bytes32 public constant AGENT_ROLE = keccak256("AGENT_ROLE");
+    bytes32 public constant NOTARY_ROLE = keccak256("NOTARY_ROLE");
+    bytes32 public constant BANK_ROLE = keccak256("BANK_ROLE");
+    bytes32 public constant REGISTRY_OFFICIAL_ROLE = keccak256("REGISTRY_OFFICIAL_ROLE");
+
+    // Structure representing a property listing.
+    struct Property {
+        uint256 propertyId;
+        address payable owner;
+        string ipfsDocumentHash; // Off-chain storage of property documents (e.g., title deeds, tax records).
+        uint256 price;
+        bool isListed;
+        bool isVerified;
+        address buyer;
+        bool inEscrow;
+    }
+    mapping(uint256 => Property) public properties;
+    uint256 public propertyCounter;
+
+    // Structure for managing escrow of funds related to milestone payments.
+    struct Escrow {
+        uint256 totalAmount;
+        uint256 releasedAmount;
+        uint256 milestones; // Number of milestones defined for the transaction.
+        mapping(uint256 => bool) milestoneReleased; // Track each milestone's release status.
+    }
+    mapping(uint256 => Escrow) private propertyEscrows;
+
+    // Events for transparency and audit trails.
+    event PropertyListed(uint256 indexed propertyId, address indexed seller, uint256 price, string ipfsDocumentHash);
+    event PropertyVerified(uint256 indexed propertyId, address indexed notary);
+    event OfferMade(uint256 indexed propertyId, address indexed buyer, uint256 offerAmount);
+    event EscrowInitiated(uint256 indexed propertyId, uint256 amount);
+    event MilestonePaymentReleased(uint256 indexed propertyId, uint256 milestone, uint256 amount);
+    event OwnershipTransferred(uint256 indexed propertyId, address indexed previousOwner, address indexed newOwner);
+    event RentDistributed(uint256 indexed propertyId, uint256 totalRent);
+    event DisputeResolved(uint256 indexed propertyId, string resolution);
+    event PropertyTokenized(uint256 indexed propertyId, uint256 totalTokens);
+
+    /**
+     * @dev Constructor assigns the deployer as the admin with default access.
+     */
+    constructor() {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+    }
+
+    /**
+     * @dev Sellers can list their property by providing a price and an IPFS hash for verified documents.
+     * @param _price The listing price of the property.
+     * @param _ipfsDocumentHash The IPFS hash storing the verified property documents.
+     */
+    function listProperty(uint256 _price, string calldata _ipfsDocumentHash) external onlyRole(SELLER_ROLE) {
+        propertyCounter++;
+        properties[propertyCounter] = Property({
+            propertyId: propertyCounter,
+            owner: payable(msg.sender),
+            ipfsDocumentHash: _ipfsDocumentHash,
+            price: _price,
+            isListed: true,
+            isVerified: false,
+            buyer: address(0),
+            inEscrow: false
+        });
+        emit PropertyListed(propertyCounter, msg.sender, _price, _ipfsDocumentHash);
+    }
+
+    /**
+     * @dev A notary or registry official verifies the property documents. In production, this should call an off-chain API via an oracle.
+     * @param _propertyId The ID of the property to verify.
+     */
+    function verifyProperty(uint256 _propertyId) external onlyRole(NOTARY_ROLE) {
+        require(properties[_propertyId].isListed, "Property not listed");
+        // Simulate document verification logic.
+        properties[_propertyId].isVerified = true;
+        emit PropertyVerified(_propertyId, msg.sender);
+    }
+
+    /**
+     * @dev Buyers make an offer on a verified property by sending the required funds.
+     * The funds are held in escrow.
+     * @param _propertyId The ID of the property being purchased.
+     */
+    function makeOffer(uint256 _propertyId) external payable onlyRole(BUYER_ROLE) nonReentrant {
+        Property storage prop = properties[_propertyId];
+        require(prop.isListed, "Property not listed");
+        require(prop.isVerified, "Property not verified");
+        require(msg.value >= prop.price, "Insufficient funds for offer");
+        require(!prop.inEscrow, "Transaction already in escrow");
+
+        prop.buyer = msg.sender;
+        prop.inEscrow = true;
+
+        // Initialize escrow details. For simplicity, we assume one milestone covering the total amount.
+        Escrow storage escrow = propertyEscrows[_propertyId];
+        escrow.totalAmount = msg.value;
+        escrow.releasedAmount = 0;
+        escrow.milestones = 1; // Can be extended to support multiple milestones.
+        
+        emit OfferMade(_propertyId, msg.sender, msg.value);
+        emit EscrowInitiated(_propertyId, msg.value);
+    }
+
+    /**
+     * @dev Releases funds for a milestone payment. Authorized roles (registry officials or banks) trigger this after external verification.
+     * @param _propertyId The property ID associated with the escrow.
+     * @param _milestone The specific milestone number being released.
+     * @param _amount The amount to release for this milestone.
+     */
+    function releaseMilestone(uint256 _propertyId, uint256 _milestone, uint256 _amount)
+        external
+        nonReentrant
+    {
+        require(
+            hasRole(REGISTRY_OFFICIAL_ROLE, msg.sender) || hasRole(BANK_ROLE, msg.sender),
+            "Unauthorized release"
+        );
+        Escrow storage escrow = propertyEscrows[_propertyId];
+        require(!escrow.milestoneReleased[_milestone], "Milestone already released");
+        require(escrow.releasedAmount + _amount <= escrow.totalAmount, "Amount exceeds escrow total");
+
+        escrow.releasedAmount += _amount;
+        escrow.milestoneReleased[_milestone] = true;
+
+        // Transfer the released funds to the seller.
+        Property storage prop = properties[_propertyId];
+        prop.owner.transfer(_amount);
+        emit MilestonePaymentReleased(_propertyId, _milestone, _amount);
+    }
+
+    /**
+     * @dev Finalizes the sale once full payment has been escrowed and released. Updates the property ownership.
+     * In a real-world scenario, this would also trigger an off-chain update to the government land registry.
+     * @param _propertyId The ID of the property being sold.
+     */
+    function finalizeSale(uint256 _propertyId) external nonReentrant {
+        Property storage prop = properties[_propertyId];
+        require(prop.inEscrow, "No active escrow for this property");
+
+        // Ensure full payment has been released.
+        Escrow storage escrow = propertyEscrows[_propertyId];
+        require(escrow.releasedAmount >= escrow.totalAmount, "Payment incomplete");
+
+        address previousOwner = prop.owner;
+        prop.owner = payable(prop.buyer);
+        prop.isListed = false;
+        prop.inEscrow = false;
+
+        // Reset buyer and escrow details as necessary.
+        emit OwnershipTransferred(_propertyId, previousOwner, prop.owner);
+
+        // Placeholder: Integrate with government land registry API to update ownership off-chain.
+    }
+
+    /**
+     * @dev Allows sellers to tokenize property ownership into fractional tokens.
+     * In practice, this would interact with a dedicated ERC20/ERC721 contract to manage tokens.
+     * @param _propertyId The ID of the property to tokenize.
+     * @param _totalTokens The total number of tokens representing the property's fractional ownership.
+     */
+    function tokenizeProperty(uint256 _propertyId, uint256 _totalTokens) external onlyRole(SELLER_ROLE) {
+        // Placeholder: Deploy or interact with a token contract here.
+        emit PropertyTokenized(_propertyId, _totalTokens);
+    }
+
+    /**
+     * @dev Distributes rent among fractional property owners. The distribution should be calculated
+     * based on the proportion of tokens held by each owner.
+     * @param _propertyId The property ID for rent distribution.
+     */
+    function distributeRent(uint256 _propertyId) external payable {
+        require(msg.value > 0, "No rent received");
+        // Placeholder: Actual token-holder balance lookup and distribution logic goes here.
+        emit RentDistributed(_propertyId, msg.value);
+    }
+
+    /**
+     * @dev Simulates DAO-based dispute resolution for a property transaction.
+     * A full DAO implementation would include proposals, voting, and automated execution.
+     * @param _propertyId The property ID related to the dispute.
+     * @param _resolution A brief description of the resolution reached.
+     */
+    function resolveDispute(uint256 _propertyId, string calldata _resolution) external {
+        // Placeholder: Integrate DAO voting mechanisms and final dispute resolution logic here.
+        emit DisputeResolved(_propertyId, _resolution);
+    }
+
+    // Additional functionality, such as mortgage disbursement and EMI payment tracking, can be implemented here.
+}
