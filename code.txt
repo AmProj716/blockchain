@@ -9,7 +9,8 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
  * @title RealEstate
  * @dev A smart contract for a decentralized real estate platform supporting multiple roles,
  * property listing with verified IPFS documents, buyer offers with escrow and milestone payments,
- * fractional tokenization, automated rent distribution, DAO-based dispute resolution, and audit trails.
+ * fractional tokenization, automated rent distribution, DAO-based dispute resolution, audit trails,
+ * mortgage loan disbursement, and EMI payment tracking.
  */
 contract RealEstate is AccessControl, ReentrancyGuard {
     // Role definitions using OpenZeppelin's AccessControl.
@@ -24,7 +25,7 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     struct Property {
         uint256 propertyId;
         address payable owner;
-        string ipfsDocumentHash; // Off-chain storage of property documents (e.g., title deeds, tax records).
+        string ipfsDocumentHash; // Off-chain storage of property documents (e.g., title deed, tax records).
         uint256 price;
         bool isListed;
         bool isVerified;
@@ -43,6 +44,17 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     }
     mapping(uint256 => Escrow) private propertyEscrows;
 
+    // Structure for Mortgage Loan and EMI tracking.
+    struct MortgageLoan {
+        uint256 loanAmount;   // Total loan amount approved.
+        uint256 emiAmount;    // Fixed EMI amount.
+        uint256 totalEmiCount; // Total number of EMI installments.
+        uint256 emiPaid;      // Number of EMI installments already paid.
+        bool isApproved;      // Mortgage approval status.
+        bool isDisbursed;     // Mortgage disbursement status.
+    }
+    mapping(uint256 => MortgageLoan) public mortgageLoans;
+
     // Events for transparency and audit trails.
     event PropertyListed(uint256 indexed propertyId, address indexed seller, uint256 price, string ipfsDocumentHash);
     event PropertyVerified(uint256 indexed propertyId, address indexed notary);
@@ -53,12 +65,18 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     event RentDistributed(uint256 indexed propertyId, uint256 totalRent);
     event DisputeResolved(uint256 indexed propertyId, string resolution);
     event PropertyTokenized(uint256 indexed propertyId, uint256 totalTokens);
+    
+    // Mortgage and EMI related events.
+    event MortgageApproved(uint256 indexed propertyId, uint256 loanAmount, uint256 emiAmount, uint256 totalEmiCount);
+    event MortgageDisbursed(uint256 indexed propertyId, uint256 loanAmount);
+    event EmiPaymentRecorded(uint256 indexed propertyId, uint256 emiNumber, uint256 emiAmount);
 
     /**
      * @dev Constructor assigns the deployer as the admin with default access.
+     * Modified: using _grantRole instead of _setupRole.
      */
     constructor() {
-        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     /**
@@ -82,7 +100,8 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev A notary or registry official verifies the property documents. In production, this should call an off-chain API via an oracle.
+     * @dev A notary or registry official verifies the property documents.
+     * In production, this should call an off-chain API via an oracle.
      * @param _propertyId The ID of the property to verify.
      */
     function verifyProperty(uint256 _propertyId) external onlyRole(NOTARY_ROLE) {
@@ -118,7 +137,8 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev Releases funds for a milestone payment. Authorized roles (registry officials or banks) trigger this after external verification.
+     * @dev Releases funds for a milestone payment.
+     * Authorized roles (registry officials or banks) trigger this after external verification.
      * @param _propertyId The property ID associated with the escrow.
      * @param _milestone The specific milestone number being released.
      * @param _amount The amount to release for this milestone.
@@ -145,8 +165,8 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev Finalizes the sale once full payment has been escrowed and released. Updates the property ownership.
-     * In a real-world scenario, this would also trigger an off-chain update to the government land registry.
+     * @dev Finalizes the sale once full payment has been escrowed and released.
+     * Updates the property ownership.
      * @param _propertyId The ID of the property being sold.
      */
     function finalizeSale(uint256 _propertyId) external nonReentrant {
@@ -180,8 +200,7 @@ contract RealEstate is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev Distributes rent among fractional property owners. The distribution should be calculated
-     * based on the proportion of tokens held by each owner.
+     * @dev Distributes rent among fractional property owners.
      * @param _propertyId The property ID for rent distribution.
      */
     function distributeRent(uint256 _propertyId) external payable {
@@ -192,7 +211,6 @@ contract RealEstate is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Simulates DAO-based dispute resolution for a property transaction.
-     * A full DAO implementation would include proposals, voting, and automated execution.
      * @param _propertyId The property ID related to the dispute.
      * @param _resolution A brief description of the resolution reached.
      */
@@ -201,5 +219,80 @@ contract RealEstate is AccessControl, ReentrancyGuard {
         emit DisputeResolved(_propertyId, _resolution);
     }
 
-    // Additional functionality, such as mortgage disbursement and EMI payment tracking, can be implemented here.
+    // ======================================================================
+    // Additional Functionality: Mortgage Loan and EMI Payment Tracking
+    // ======================================================================
+
+    /**
+     * @dev Allows a bank to approve a mortgage loan for a specific property.
+     * @param _propertyId The property ID for which the mortgage is being approved.
+     * @param _loanAmount The total loan amount approved.
+     * @param _emiAmount The fixed EMI amount for each installment.
+     * @param _totalEmiCount The total number of EMI installments.
+     */
+    function approveMortgage(
+        uint256 _propertyId,
+        uint256 _loanAmount,
+        uint256 _emiAmount,
+        uint256 _totalEmiCount
+    ) external onlyRole(BANK_ROLE) {
+        MortgageLoan storage loan = mortgageLoans[_propertyId];
+        require(!loan.isApproved, "Mortgage already approved");
+        loan.loanAmount = _loanAmount;
+        loan.emiAmount = _emiAmount;
+        loan.totalEmiCount = _totalEmiCount;
+        loan.emiPaid = 0;
+        loan.isApproved = true;
+        emit MortgageApproved(_propertyId, _loanAmount, _emiAmount, _totalEmiCount);
+    }
+
+    /**
+     * @dev Allows a bank to disburse the approved mortgage loan for a property.
+     * The bank must send the exact loan amount when calling this function.
+     * @param _propertyId The property ID for which the mortgage loan is disbursed.
+     */
+    function disburseMortgage(uint256 _propertyId) external payable onlyRole(BANK_ROLE) {
+        MortgageLoan storage loan = mortgageLoans[_propertyId];
+        require(loan.isApproved, "Mortgage not approved");
+        require(!loan.isDisbursed, "Mortgage already disbursed");
+        require(msg.value == loan.loanAmount, "Incorrect disbursement amount");
+
+        // Transfer the disbursed mortgage funds to the seller.
+        Property storage prop = properties[_propertyId];
+        require(prop.owner != address(0), "Property not listed");
+        prop.owner.transfer(msg.value);
+
+        loan.isDisbursed = true;
+        emit MortgageDisbursed(_propertyId, loan.loanAmount);
+    }
+
+    /**
+     * @dev Records an EMI payment for a disbursed mortgage loan.
+     * The buyer must send the exact EMI amount when calling this function.
+     * @param _propertyId The property ID associated with the mortgage loan.
+     */
+    function recordEmiPayment(uint256 _propertyId) external payable onlyRole(BUYER_ROLE) {
+        MortgageLoan storage loan = mortgageLoans[_propertyId];
+        require(loan.isApproved && loan.isDisbursed, "Mortgage not active");
+        require(loan.emiPaid < loan.totalEmiCount, "All EMI payments completed");
+        require(msg.value == loan.emiAmount, "Incorrect EMI amount");
+
+        // Update the EMI count.
+        loan.emiPaid += 1;
+        emit EmiPaymentRecorded(_propertyId, loan.emiPaid, loan.emiAmount);
+    }
+
+    /**
+     * @dev Returns the number of outstanding EMI installments for a mortgage loan.
+     * @param _propertyId The property ID associated with the mortgage loan.
+     * @return outstanding The number of remaining EMI payments.
+     */
+    function outstandingEmis(uint256 _propertyId) external view returns (uint256 outstanding) {
+        MortgageLoan storage loan = mortgageLoans[_propertyId];
+        if(loan.totalEmiCount > loan.emiPaid) {
+            outstanding = loan.totalEmiCount - loan.emiPaid;
+        } else {
+            outstanding = 0;
+        }
+    }
 }
